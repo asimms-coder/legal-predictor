@@ -2,6 +2,7 @@
 import argparse, json, os, re, csv
 from datetime import datetime
 from dateutil.parser import isoparse
+import re
 
 HEADINGS = {"CONCLUSION","DISPOSITION","JUDGMENT","DECREE","ORDER","ORDERS","DECISION"}
 DISP_PATTERNS = [re.compile(rx, re.I) for rx in [
@@ -10,14 +11,44 @@ DISP_PATTERNS = [re.compile(rx, re.I) for rx in [
     r"\bso ordered\b",
 ]]
 
-def normalize_label(s):
-    if not s: return None
-    s = s.lower()
-    if "remand" in s: return "REMAND"
-    if "reverse" in s: return "REVERSE"
-    if "vacate" in s:  return "REVERSE"
-    if "affirm" in s:  return "AFFIRM"
+_COMBO_RULES = [
+    (r"\baffirm\w+\s+in\s+part.*revers\w+\s+in\s+part.*remand\w+\b", "REMAND"),
+    (r"\baffirm\w+\s+in\s+part.*vacat\w+.*remand\w+\b", "REMAND"),
+
+    (r"\bvacat\w+[\s,;]+(?:and\s+)?remand\w+\b", "REMAND"),
+    (r"\brevers\w+[\s,;]+(?:and\s+)?remand\w+\b", "REMAND"),
+
+    (r"\baffirm\w+\s+in\s+part.*revers\w+\s+in\s+part\b", "REVERSE"),
+    (r"\baffirm\w+\s+in\s+part.*vacat\w+(?:\s+in\s+part)?\b", "REVERSE"),
+]
+
+
+
+_SINGLE_RULES = [
+    (r"\bremand(?:ed|s|ing)?\b", "REMAND"),
+    (r"\bset\s+aside\b", "REVERSE"),                 
+    (r"\boverturn(?:ed|s|ing)?\b", "REVERSE"),       
+    (r"\brevers(?:e|ed|es|ing)?\b", "REVERSE"),
+    (r"\bvacat(?:ed|es|ing)?\b", "REVERSE"),
+    (r"\baffirm(?:ed|s|ing)?\b", "AFFIRM"),
+]
+
+
+def normalize_label(s: str) -> str | None:
+    if not s:
+        return None
+    s = s.strip().lower()
+
+    for rx, lab in _COMBO_RULES:
+        if re.search(rx, s):
+            return lab
+
+    for rx, lab in _SINGLE_RULES:
+        if re.search(rx, s):
+            return lab
+
     return None
+
 
 def split_sents(t):  # simple sentence splitter
     return re.split(r"(?<=[\.\?\!])\s+(?=[A-Z0-9])", (t or "").strip())
@@ -57,7 +88,7 @@ def drop_disposition_sents(sents):
         out.append(s)
     return out
 
-def tail_trim(sents, k=5):
+def tail_trim(sents, k=3):
     if len(sents) > 10: return sents[:-k]
     return sents
 
