@@ -5,6 +5,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report, f1_score
+from sklearn.model_selection import StratifiedShuffleSplit
 from joblib import dump
 
 def temporal_split(df, train_end=2015, val_end=2018):
@@ -13,43 +14,59 @@ def temporal_split(df, train_end=2015, val_end=2018):
     test  = df[df.year > val_end]
     return train, val, test
 
+def stratified_fallback(df):
+    sss1 = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    y = df["label"]
+    train_idx, test_idx = next(sss1.split(df, y))
+    train_all, test = df.iloc[train_idx], df.iloc[test_idx]
+    sss2 = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=43)
+    y_tr = train_all["label"]
+    tr_idx, va_idx = next(sss2.split(train_all, y_tr))
+    train, val = train_all.iloc[tr_idx], train_all.iloc[va_idx]
+    return train, val, test
+
 def main(csv_path, model_out, max_features):
     df = pd.read_csv(csv_path)
     df = df.dropna(subset=["text_clean","label","year"])
     df = df[df["label"].isin(["AFFIRM","REVERSE","REMAND"])]
 
     train, val, test = temporal_split(df)
-    print("Split sizes:", {k: len(v) for k,v in zip(["train","val","test"], [train,val,test])})
+    use_fallback = (len(val) == 0 or len(test) == 0)
+    if use_fallback:
+        print("Temporal split had empty val/test; using stratified fallback.")
+        train, val, test = stratified_fallback(df)
 
-    pipe = Pipeline([
-        ("tfidf", TfidfVectorizer(
-            ngram_range=(1,2),
-            max_features=max_features,
-            min_df=3,
-            strip_accents="unicode",
-            lowercase=True,
-        )),
-        ("clf", LogisticRegression(
-            max_iter=2000,
-            class_weight="balanced",
-            solver="saga",
-            n_jobs=-1
-        ))
-    ])
+    print("Split sizes:", {"train": len(train), "val": len(val), "test": len(test)})
 
+    # For tiny datasets, simpler features & solver are more stable
+    tiny = len(train) < 200
+    tfidf = TfidfVectorizer(
+        ngram_range=(1,1) if tiny else (1,2),
+        max_features=50000 if tiny else max_features,
+        min_df=1 if tiny else 3,
+        strip_accents="unicode",
+        lowercase=True,
+    )
+    clf = LogisticRegression(
+        max_iter=2000,
+        class_weight="balanced",
+        solver="liblinear" if tiny else "saga",
+        C=2.0 if tiny else 1.0,
+        n_jobs=None if tiny else -1
+    )
+
+    pipe = Pipeline([("tfidf", tfidf), ("clf", clf)])
     pipe.fit(train.text_clean.values, train.label.values)
 
     print("\nValidation:")
-    yv = val.label.values
     pv = pipe.predict(val.text_clean.values)
-    print(classification_report(yv, pv, digits=3))
-    print("Val macro-F1:", f1_score(yv, pv, average="macro"))
+    print(classification_report(val.label.values, pv, digits=3, zero_division=0))
+    print("Val macro-F1:", f1_score(val.label.values, pv, average="macro", zero_division=0))
 
     print("\nTest:")
-    yt = test.label.values
     pt = pipe.predict(test.text_clean.values)
-    print(classification_report(yt, pt, digits=3))
-    print("Test macro-F1:", f1_score(yt, pt, average="macro"))
+    print(classification_report(test.label.values, pt, digits=3, zero_division=0))
+    print("Test macro-F1:", f1_score(test.label.values, pt, average="macro", zero_division=0))
 
     os.makedirs(os.path.dirname(model_out), exist_ok=True)
     dump(pipe, model_out)
